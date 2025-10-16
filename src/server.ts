@@ -1,3 +1,7 @@
+/**
+ * Express SSR Server
+ * Lean and clean - all bootstrap logic is in separate modules
+ */
 import {
   AngularNodeAppEngine,
   createNodeRequestHandler,
@@ -5,64 +9,89 @@ import {
   writeResponseToNodeResponse,
 } from '@angular/ssr/node';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { join } from 'node:path';
+
+// Bootstrap and configuration
+import { bootstrap } from './server/bootstrap';
+import { config, ENVIRONMENT } from './config';
+
+// Middleware
+import { cspMiddleware } from './server/middleware/csp.middleware';
+import { errorHandler, notFoundHandler } from './server/middleware/error.middleware';
+
+// Routes
+import apiRoutes from './server/routes/api.routes';
 
 const browserDistFolder = join(import.meta.dirname, '../browser');
 
-const app = express();
-const angularApp = new AngularNodeAppEngine();
-
 /**
- * Example Express Rest API endpoints can be defined here.
- * Uncomment and define endpoints as necessary.
- *
- * Example:
- * ```ts
- * app.get('/api/{*splat}', (req, res) => {
- *   // Handle API request
- * });
- * ```
+ * Create and configure Express app
  */
+async function createApp() {
+  // Bootstrap all dependencies (certs, vault, AWS, OpenSearch)
+  await bootstrap();
 
-/**
- * Serve static files from /browser
- */
-app.use(
-  express.static(browserDistFolder, {
-    maxAge: '1y',
-    index: false,
-    redirect: false,
-  }),
-);
+  const app = express();
+  const angularApp = new AngularNodeAppEngine();
 
-/**
- * Handle all other requests by rendering the Angular application.
- */
-app.use((req, res, next) => {
-  angularApp
-    .handle(req)
-    .then((response) =>
-      response ? writeResponseToNodeResponse(response, res) : next(),
-    )
-    .catch(next);
-});
+  // ===== Middleware =====
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
+  app.use(cookieParser());
+  app.use(cspMiddleware);
 
-/**
- * Start the server if this module is the main entry point, or it is ran via PM2.
- * The server listens on the port defined by the `PORT` environment variable, or defaults to 4000.
- */
-if (isMainModule(import.meta.url) || process.env['pm_id']) {
-  const port = process.env['PORT'] || 4000;
-  app.listen(port, (error) => {
-    if (error) {
-      throw error;
-    }
+  // ===== API Routes =====
+  app.use('/api', apiRoutes);
 
-    console.log(`Node Express server listening on http://localhost:${port}`);
+  // ===== Static Files =====
+  app.use(
+    express.static(browserDistFolder, {
+      maxAge: '1y',
+      index: false,
+      redirect: false,
+    }),
+  );
+
+  // ===== Angular SSR =====
+  app.use((req, res, next) => {
+    angularApp
+      .handle(req)
+      .then((response) => (response ? writeResponseToNodeResponse(response, res) : next()))
+      .catch(next);
   });
+
+  // ===== Error Handling =====
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+
+  return app;
 }
 
 /**
- * Request handler used by the Angular CLI (for dev-server and during build) or Firebase Cloud Functions.
+ * Start the server if this module is the main entry point, or it is ran via PM2.
  */
-export const reqHandler = createNodeRequestHandler(app);
+if (isMainModule(import.meta.url) || process.env['pm_id']) {
+  createApp()
+    .then((app) => {
+      const port = config.server.port;
+      const host = config.server.host;
+
+      app.listen(port, () => {
+        console.log(`\n🚀 Server is running!`);
+        console.log(`📍 Local: http://${host}:${port}`);
+        console.log(`🌍 Environment: ${ENVIRONMENT}`);
+        console.log(`📦 Project: ${config.projectName}`);
+        console.log(`🔗 Ping: http://${host}:${port}/api/ping\n`);
+      });
+    })
+    .catch((error) => {
+      console.error('Failed to start server:', error);
+      process.exit(1);
+    });
+}
+
+/**
+ * Request handler used by the Angular CLI (for dev-server and during build)
+ */
+export const reqHandler = createApp().then((app) => createNodeRequestHandler(app));
